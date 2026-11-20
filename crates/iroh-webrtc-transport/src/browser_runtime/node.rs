@@ -194,7 +194,8 @@ fn trace_iroh_connection_paths(
     connection_key: Option<u64>,
     connection: &Connection,
 ) {
-    let paths = connection.paths().into_iter().collect::<Vec<_>>();
+    let path_list = connection.paths();
+    let paths = path_list.iter().collect::<Vec<_>>();
     let path_count = paths.len();
     let selected_paths = paths
         .iter()
@@ -248,7 +249,7 @@ fn should_debug_path_snapshot(label: &str) -> bool {
     )
 }
 
-fn describe_iroh_path(connection: &Connection, path: &iroh::endpoint::PathInfo) -> String {
+fn describe_iroh_path(connection: &Connection, path: &iroh::endpoint::Path<'_>) -> String {
     let kind = if path.is_relay() {
         "relay"
     } else if path.is_ip() {
@@ -256,7 +257,7 @@ fn describe_iroh_path(connection: &Connection, path: &iroh::endpoint::PathInfo) 
     } else {
         "custom"
     };
-    let stats = path.stats();
+    let stats = Some(path.stats());
     let rtt_ms = stats.map(|stats| stats.rtt.as_millis());
     let path_cwnd = stats.map(|stats| stats.cwnd);
     let current_mtu = stats.map(|stats| stats.current_mtu);
@@ -277,7 +278,8 @@ fn describe_iroh_path(connection: &Connection, path: &iroh::endpoint::PathInfo) 
         path.id(),
         kind,
         path.is_selected(),
-        path.is_closed(),
+        // A PathList snapshot only holds open paths.
+        false,
         path.remote_addr(),
         rtt_ms,
         path_cwnd,

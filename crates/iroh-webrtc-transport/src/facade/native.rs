@@ -648,7 +648,10 @@ impl ProtocolHandler for NativeBootstrapHandler {
         self.node
             .handle_bootstrap_connection(connection)
             .await
-            .map_err(|err| AcceptError::from_boxed(err.into()))
+            .map_err(|err| {
+                tracing::warn!(error = ?err, "native WebRTC bootstrap handler failed");
+                AcceptError::from_boxed(err.into())
+            })
     }
 }
 
