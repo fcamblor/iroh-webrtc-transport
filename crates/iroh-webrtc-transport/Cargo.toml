@@ -47,7 +47,7 @@ tokio = { version = "1", default-features = false, features = ["io-util", "macro
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 js-sys = { version = "0.3", optional = true }
-wasm-bindgen = { version = "=0.2.118", optional = true }
+wasm-bindgen = { version = "0.2.118", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.web-sys]
