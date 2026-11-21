@@ -81,6 +81,44 @@ async fn native_facade_dials_and_accepts_ping_pong_over_webrtc() -> anyhow::Resu
     Ok(())
 }
 
+/// The browser runtime keeps every stream handle: requests must keep flowing past the
+/// QUIC concurrent stream limit even when finished streams are never dropped.
+#[tokio::test]
+async fn finished_streams_kept_alive_do_not_exhaust_stream_credit() -> anyhow::Result<()> {
+    let client = native_node(SecretKey::generate()).await?;
+    let server = native_node(SecretKey::generate()).await?;
+    let server_addr = endpoint_addr(&server).await?;
+    let accept_server = server.clone();
+    let accept = task::spawn(async move {
+        let connection = accept_server.accept(ALPN).await?;
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+            recv.read_to_end(64).await?;
+            send.write_all(PONG).await?;
+            send.finish()?;
+        }
+        anyhow::Ok(())
+    });
+    let connection = timeout(
+        "dial facade connection",
+        client.dial(server_addr, ALPN, WebRtcDialOptions::webrtc_only()),
+    )
+    .await?;
+    let mut kept = Vec::new();
+    for i in 0..300 {
+        let (mut send, mut recv) = timeout("open bidirectional stream", connection.open_bi())
+            .await
+            .map_err(|e| e.context(format!("stream {i}")))?;
+        send.write_all(PING).await?;
+        send.finish()?;
+        assert_eq!(recv.read_to_end(64).await?, PONG);
+        kept.push((send, recv));
+    }
+    accept.abort();
+    client.close().await;
+    server.close().await;
+    Ok(())
+}
+
 /// Opening a long discussion streams megabytes at once: the DataChannel must carry them.
 #[tokio::test]
 async fn large_response_crosses_the_data_channel() -> anyhow::Result<()> {
