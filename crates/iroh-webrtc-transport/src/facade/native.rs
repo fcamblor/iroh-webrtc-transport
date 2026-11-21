@@ -717,6 +717,11 @@ impl ProtocolHandler for WebRtcSessionGate {
         match expected.is_empty() {
             false => {}
             true => {
+                tracing::warn!(
+                    remote = %connection.remote_id(),
+                    %alpn,
+                    "rejecting WebRTC application connection: no negotiated session for this peer"
+                );
                 connection.close(
                     0u32.into(),
                     b"custom app connection did not match WebRTC session",
@@ -728,6 +733,13 @@ impl ProtocolHandler for WebRtcSessionGate {
             }
         };
         if let Err(err) = require_webrtc_selected_path(&connection, &expected) {
+            tracing::warn!(
+                remote = %connection.remote_id(),
+                %alpn,
+                error = %err,
+                sessions = expected.len(),
+                "rejecting WebRTC application connection"
+            );
             connection.close(0u32.into(), b"WebRTC custom path was not selected");
             return Err(AcceptError::from_boxed(err.into()));
         }
