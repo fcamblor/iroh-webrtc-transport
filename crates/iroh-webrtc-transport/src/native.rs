@@ -13,7 +13,7 @@ use std::sync::{
 use bytes::Bytes;
 use iroh_base::CustomAddr;
 use n0_future::task;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::Notify;
 use webrtc::{
     api::APIBuilder,
     data_channel::{
@@ -385,13 +385,9 @@ async fn pump_outbound_frames(
     mut outbound_rx: OutboundPacketReceiver,
     destination: CustomAddr,
     config: WebRtcSessionConfig,
-    close_notify: Arc<Notify>,
+    _close_notify: Arc<Notify>,
 ) {
-    let buffered_amount_low_threshold = config.data_channel.buffered_amount_low_threshold;
     let buffered_amount_high_threshold = config.data_channel.buffered_amount_high_threshold;
-    channel
-        .set_buffered_amount_low_threshold(buffered_amount_low_threshold)
-        .await;
     loop {
         let packet = match outbound_rx.recv().await {
             Some(packet) => packet,
@@ -407,28 +403,18 @@ async fn pump_outbound_frames(
             return;
         }
 
-        if channel
-            .buffered_amount()
-            .await
-            .saturating_add(packet.bytes.len())
-            > buffered_amount_high_threshold
-            && !wait_for_native_data_channel_capacity(
-                &channel,
-                buffered_amount_low_threshold,
-                buffered_amount_high_threshold,
-                &close_notify,
-            )
-            .await
-        {
-            hub.unregister_outbound_for(&destination);
-            let buffered_amount = channel.buffered_amount().await;
-            tracing::debug!(
+        // Behave like a UDP socket: drop the datagram when the channel is backed up instead of
+        // queueing megabytes. QUIC sees the loss and slows down; a deep queue hides congestion
+        // from it until the path stalls (seconds of backlog on a mobile link) and ICE gives up.
+        let buffered_amount = channel.buffered_amount().await;
+        if buffered_amount.saturating_add(packet.bytes.len()) > buffered_amount_high_threshold {
+            tracing::trace!(
                 buffered_amount,
-                buffered_amount_low_threshold,
                 buffered_amount_high_threshold,
-                "stopping native WebRTC outbound pump while waiting for capacity"
+                packet_bytes = packet.bytes.len(),
+                "dropping outbound WebRTC datagram: data channel backed up"
             );
-            return;
+            continue;
         }
 
         if let Err(err) = channel.send(&Bytes::from(packet.bytes)).await {
@@ -436,58 +422,6 @@ async fn pump_outbound_frames(
             hub.unregister_outbound_for(&destination);
             return;
         }
-    }
-}
-
-async fn wait_for_native_data_channel_capacity(
-    channel: &Arc<RTCDataChannel>,
-    low_threshold: usize,
-    high_threshold: usize,
-    close_notify: &Arc<Notify>,
-) -> bool {
-    if channel.buffered_amount().await <= low_threshold {
-        return true;
-    }
-
-    let buffered_amount = channel.buffered_amount().await;
-    tracing::trace!(
-        buffered_amount,
-        buffered_amount_low_threshold = low_threshold,
-        buffered_amount_high_threshold = high_threshold,
-        "waiting for native WebRTC data channel buffered amount to drain"
-    );
-
-    let (tx, rx) = oneshot::channel();
-    let tx = Arc::new(Mutex::new(Some(tx)));
-    let low_tx = tx.clone();
-    channel
-        .on_buffered_amount_low(Box::new(move || {
-            let low_tx = low_tx.clone();
-            Box::pin(async move {
-                if let Some(tx) = low_tx
-                    .lock()
-                    .expect("buffered amount low sender mutex poisoned")
-                    .take()
-                {
-                    let _ = tx.send(());
-                }
-            })
-        }))
-        .await;
-
-    if channel.buffered_amount().await <= low_threshold {
-        if let Some(tx) = tx
-            .lock()
-            .expect("buffered amount low sender mutex poisoned")
-            .take()
-        {
-            let _ = tx.send(());
-        }
-    }
-
-    tokio::select! {
-        _ = rx => true,
-        _ = close_notify.notified() => false,
     }
 }
 

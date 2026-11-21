@@ -11,9 +11,11 @@ pub const DEFAULT_LOCAL_ICE_QUEUE_CAPACITY: usize = 128;
 /// Default per-session packet queue capacity for inbound and outbound custom transport packets.
 pub const DEFAULT_SESSION_QUEUE_CAPACITY: usize = 1024;
 /// Default DataChannel buffered amount that resumes a paused outbound pump.
-pub const DEFAULT_DATA_CHANNEL_BUFFERED_AMOUNT_LOW_THRESHOLD: usize = 4 * 1024 * 1024;
-/// Default DataChannel buffered amount that pauses a per-session outbound pump.
-pub const DEFAULT_DATA_CHANNEL_BUFFERED_AMOUNT_HIGH_THRESHOLD: usize = 16 * 1024 * 1024;
+pub const DEFAULT_DATA_CHANNEL_BUFFERED_AMOUNT_LOW_THRESHOLD: usize = 64 * 1024;
+/// Default DataChannel buffered amount above which outbound datagrams are dropped (native) or
+/// the pump pauses (browser). Kept near one bandwidth-delay product of a mobile link: a deeper
+/// queue hides congestion from QUIC until the path stalls.
+pub const DEFAULT_DATA_CHANNEL_BUFFERED_AMOUNT_HIGH_THRESHOLD: usize = 256 * 1024;
 
 /// Direct-only ICE server configuration.
 ///
