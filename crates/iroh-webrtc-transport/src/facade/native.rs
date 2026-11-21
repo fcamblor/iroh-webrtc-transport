@@ -732,7 +732,17 @@ impl ProtocolHandler for WebRtcSessionGate {
                 )));
             }
         };
-        if let Err(err) = require_webrtc_selected_path(&connection, &expected) {
+        // Right after the handshake Iroh may not have selected a path yet: give it a moment
+        // instead of rejecting a valid connection.
+        let mut checked = require_webrtc_selected_path(&connection, &expected);
+        for _ in 0..40 {
+            if !matches!(&checked, Err(e) if e.to_string().contains("no selected Iroh path")) {
+                break;
+            }
+            n0_future::time::sleep(std::time::Duration::from_millis(50)).await;
+            checked = require_webrtc_selected_path(&connection, &expected);
+        }
+        if let Err(err) = checked {
             tracing::warn!(
                 remote = %connection.remote_id(),
                 %alpn,
