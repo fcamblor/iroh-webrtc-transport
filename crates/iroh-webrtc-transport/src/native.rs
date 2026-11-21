@@ -388,6 +388,10 @@ async fn pump_outbound_frames(
     _close_notify: Arc<Notify>,
 ) {
     let buffered_amount_high_threshold = config.data_channel.buffered_amount_high_threshold;
+    // Drops are expected under congestion, but a channel whose buffer never drains drops
+    // everything: summarize them once per second so a stalled channel shows in the logs.
+    let mut dropped: u64 = 0;
+    let mut dropped_since = std::time::Instant::now();
     loop {
         let packet = match outbound_rx.recv().await {
             Some(packet) => packet,
@@ -414,6 +418,17 @@ async fn pump_outbound_frames(
                 packet_bytes = packet.bytes.len(),
                 "dropping outbound WebRTC datagram: data channel backed up"
             );
+            dropped += 1;
+            if dropped_since.elapsed() >= std::time::Duration::from_secs(1) {
+                tracing::debug!(
+                    dropped,
+                    buffered_amount,
+                    buffered_amount_high_threshold,
+                    "dropped outbound WebRTC datagrams: data channel backed up"
+                );
+                dropped = 0;
+                dropped_since = std::time::Instant::now();
+            }
             continue;
         }
 
