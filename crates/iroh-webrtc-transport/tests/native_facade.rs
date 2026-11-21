@@ -81,6 +81,42 @@ async fn native_facade_dials_and_accepts_ping_pong_over_webrtc() -> anyhow::Resu
     Ok(())
 }
 
+/// Opening a long discussion streams megabytes at once: the DataChannel must carry them.
+#[tokio::test]
+async fn large_response_crosses_the_data_channel() -> anyhow::Result<()> {
+    const SIZE: usize = 16 << 20;
+    let client = native_node(SecretKey::generate()).await?;
+    let server = native_node(SecretKey::generate()).await?;
+    let server_addr = endpoint_addr(&server).await?;
+    let accept_server = server.clone();
+    let accept = task::spawn(async move {
+        let connection = accept_server.accept(ALPN).await?;
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        recv.read_to_end(64).await?;
+        send.write_all(&vec![7u8; SIZE]).await?;
+        send.finish()?;
+        connection.closed().await;
+        anyhow::Ok(())
+    });
+    let connection = timeout(
+        "dial facade connection",
+        client.dial(server_addr, ALPN, WebRtcDialOptions::webrtc_only()),
+    )
+    .await?;
+    let (mut send, mut recv) = timeout("open bidirectional stream", connection.open_bi()).await?;
+    send.write_all(PING).await?;
+    send.finish()?;
+    let body = future_timeout(Duration::from_secs(60), recv.read_to_end(SIZE + 1))
+        .await
+        .map_err(|_| anyhow::anyhow!("large read timed out"))??;
+    assert_eq!(body.len(), SIZE);
+    connection.close(0u32.into(), b"done");
+    let _ = future_timeout(Duration::from_secs(5), accept).await;
+    client.close().await;
+    server.close().await;
+    Ok(())
+}
+
 /// A browser reload restarts its node with the same key: the second session must work too.
 #[tokio::test]
 async fn same_identity_redials_after_its_previous_node_went_away() -> anyhow::Result<()> {
