@@ -10,6 +10,9 @@ use iroh::{
     protocol::{AcceptError, DynProtocolHandler, ProtocolHandler, Router},
 };
 use n0_future::task::{self, JoinHandle};
+
+/// How long an answered bootstrap connection waits for the dialer to close it.
+const BOOTSTRAP_LINGER: std::time::Duration = std::time::Duration::from_secs(10);
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::{
@@ -313,7 +316,7 @@ impl NativeWebRtcIrohNode {
             .connect(application_addr, &alpn)
             .await
             .context("failed to dial WebRTC custom transport application connection")?;
-        if let Err(err) = require_webrtc_selected_path(&connection, expected_remote_addr) {
+        if let Err(err) = require_webrtc_selected_path(&connection, &[expected_remote_addr]) {
             connection.close(0u32.into(), b"WebRTC custom path was not selected");
             return Err(err).context("WebRTC application dial selected the wrong transport path");
         }
@@ -400,6 +403,16 @@ impl NativeWebRtcIrohNode {
     }
 
     async fn handle_bootstrap_connection(&self, connection: Connection) -> Result<()> {
+        let result = self.answer_bootstrap(connection.clone()).await;
+        // The Iroh router closes the connection as soon as this handler returns, which drops
+        // signals still in flight to the dialer. Let the dialer close it once it has them.
+        if result.is_ok() {
+            let _ = n0_future::time::timeout(BOOTSTRAP_LINGER, connection.closed()).await;
+        }
+        result
+    }
+
+    async fn answer_bootstrap(&self, connection: Connection) -> Result<()> {
         let bootstrap = BootstrapStream::from_connection(connection, BootstrapConfig::default());
         let channel = bootstrap
             .accept_channel()
@@ -480,7 +493,10 @@ impl NativeWebRtcIrohNode {
         }
     }
 
-    fn matching_acceptor_session(&self, remote: EndpointId, alpn: &str) -> Option<WebRtcAddr> {
+    /// Every session negotiated with `remote` for `alpn`, newest first. A peer that restarts
+    /// with the same key (a reloaded browser tab) negotiates a new session while the old route
+    /// is still recorded, so the accepted connection may belong to any of them.
+    fn matching_acceptor_sessions(&self, remote: EndpointId, alpn: &str) -> Vec<WebRtcAddr> {
         let state = self
             .inner
             .state
@@ -489,8 +505,10 @@ impl NativeWebRtcIrohNode {
         state
             .session_routes
             .iter()
-            .find(|route| route.remote == remote && route.alpn == alpn)
+            .rev()
+            .filter(|route| route.remote == remote && route.alpn == alpn)
             .map(|route| WebRtcAddr::session(remote, route.dial_id.0))
+            .collect()
     }
 }
 
@@ -693,12 +711,12 @@ impl ProtocolHandler for WebRtcSessionGate {
     ) -> std::result::Result<Connection, AcceptError> {
         let connection = self.handler.on_accepting(accepting).await?;
         let alpn = String::from_utf8_lossy(connection.alpn()).to_string();
-        let expected = match self
+        let expected = self
             .node
-            .matching_acceptor_session(connection.remote_id(), &alpn)
-        {
-            Some(expected) => expected,
-            None => {
+            .matching_acceptor_sessions(connection.remote_id(), &alpn);
+        match expected.is_empty() {
+            false => {}
+            true => {
                 connection.close(
                     0u32.into(),
                     b"custom app connection did not match WebRTC session",
@@ -709,7 +727,7 @@ impl ProtocolHandler for WebRtcSessionGate {
                 )));
             }
         };
-        if let Err(err) = require_webrtc_selected_path(&connection, expected) {
+        if let Err(err) = require_webrtc_selected_path(&connection, &expected) {
             connection.close(0u32.into(), b"WebRTC custom path was not selected");
             return Err(AcceptError::from_boxed(err.into()));
         }
@@ -740,7 +758,7 @@ async fn bind_webrtc_application_endpoint(
         .context("failed to bind native WebRTC application endpoint")
 }
 
-fn require_webrtc_selected_path(connection: &Connection, expected: WebRtcAddr) -> Result<()> {
+fn require_webrtc_selected_path(connection: &Connection, expected: &[WebRtcAddr]) -> Result<()> {
     for path in connection.paths().into_iter() {
         if !path.is_selected() {
             continue;
@@ -753,7 +771,7 @@ fn require_webrtc_selected_path(connection: &Connection, expected: WebRtcAddr) -
         };
         let actual = WebRtcAddr::from_custom_addr(custom_addr)
             .context("selected custom path is not a WebRTC session address")?;
-        if actual == expected {
+        if expected.contains(&actual) {
             return Ok(());
         }
         bail!(

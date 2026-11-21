@@ -81,6 +81,57 @@ async fn native_facade_dials_and_accepts_ping_pong_over_webrtc() -> anyhow::Resu
     Ok(())
 }
 
+/// A browser reload restarts its node with the same key: the second session must work too.
+#[tokio::test]
+async fn same_identity_redials_after_its_previous_node_went_away() -> anyhow::Result<()> {
+    let server = native_node(SecretKey::generate()).await?;
+    let server_addr = endpoint_addr(&server).await?;
+    let accept_server = server.clone();
+    let accept = task::spawn(async move {
+        loop {
+            let connection = accept_server.accept(ALPN).await?;
+            task::spawn(async move {
+                while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                    let ping = recv.read_to_end(64).await?;
+                    assert_eq!(ping, PING);
+                    send.write_all(PONG).await?;
+                    send.finish()?;
+                }
+                anyhow::Ok(())
+            });
+        }
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+    });
+
+    let key = SecretKey::generate();
+    for round in 0..2 {
+        let client = native_node(key.clone()).await?;
+        let connection = timeout(
+            "dial facade connection",
+            client.dial(server_addr.clone(), ALPN, WebRtcDialOptions::webrtc_only()),
+        )
+        .await
+        .map_err(|e| e.context(format!("round {round}")))?;
+        let (mut send, mut recv) = timeout("open bidirectional stream", connection.open_bi())
+            .await
+            .map_err(|e| e.context(format!("round {round}")))?;
+        timeout("write ping", send.write_all(PING)).await?;
+        send.finish()?;
+        let pong = timeout("read pong", recv.read_to_end(64))
+            .await
+            .map_err(|e| e.context(format!("round {round}")))?;
+        assert_eq!(pong, PONG);
+        // Like a page reload: the node vanishes without closing its connections.
+        drop(connection);
+        drop(client);
+    }
+
+    accept.abort();
+    server.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn native_webrtc_only_node_rejects_plain_iroh_application_dial() -> anyhow::Result<()> {
     let server =
