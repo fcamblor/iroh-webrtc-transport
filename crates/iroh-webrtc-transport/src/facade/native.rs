@@ -369,7 +369,25 @@ impl NativeWebRtcIrohNode {
         if state.closed {
             bail!("native WebRTC node is closed");
         }
+        // A phone redials at every reload and network change: keep only its recent sessions,
+        // older ones are long closed.
+        const MAX_ROUTES_PER_PEER: usize = 32;
+        let (remote, alpn) = (route.remote, route.alpn.clone());
         state.session_routes.push(route);
+        let same = |r: &NativeSessionRoute| r.remote == remote && r.alpn == alpn;
+        let mut excess = state
+            .session_routes
+            .iter()
+            .filter(|r| same(r))
+            .count()
+            .saturating_sub(MAX_ROUTES_PER_PEER);
+        state.session_routes.retain(|r| {
+            if excess > 0 && same(r) {
+                excess -= 1;
+                return false;
+            }
+            true
+        });
         Ok(())
     }
 
@@ -741,6 +759,17 @@ impl ProtocolHandler for WebRtcSessionGate {
             }
             n0_future::time::sleep(std::time::Duration::from_millis(50)).await;
             checked = require_webrtc_selected_path(&connection, &expected);
+        }
+        // Still no selected path (slow mobile link): the application endpoint has no relay nor
+        // IP transport, so the connection can only travel over a WebRTC session of this peer.
+        // Accept it rather than reject a valid connection; a mismatching path is still refused.
+        if matches!(&checked, Err(e) if e.to_string().contains("no selected Iroh path")) {
+            tracing::debug!(
+                remote = %connection.remote_id(),
+                %alpn,
+                "accepting WebRTC application connection before Iroh selected its path"
+            );
+            checked = Ok(());
         }
         if let Err(err) = checked {
             tracing::warn!(
