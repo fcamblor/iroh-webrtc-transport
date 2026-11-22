@@ -160,6 +160,7 @@ impl BrowserRuntimeNode {
                 stream_key = stream_key.0,
                 "finished Iroh stream send side after chunk"
             );
+            self.release_stream_if_done(stream_key, &stream);
         }
         Ok(BrowserStreamSendOutcome {
             accepted_bytes: chunk.len(),
@@ -225,6 +226,9 @@ impl BrowserRuntimeNode {
                 stream_key = stream_key.0,
                 "Iroh stream receive side reached EOF"
             );
+            stream.closed_recv.store(true, Ordering::SeqCst);
+            drop(recv);
+            self.release_stream_if_done(stream_key, &stream);
             return Ok(BrowserStreamReceiveOutcome {
                 done: true,
                 chunk: None,
@@ -289,7 +293,22 @@ impl BrowserRuntimeNode {
                 "closed Iroh stream send side"
             );
         }
+        drop(send);
+        self.release_stream_if_done(stream_key, &stream);
         Ok(BrowserStreamCloseSendOutcome { closed: true })
+    }
+
+    /// Forgets a stream once both sides are closed. Keeping its handles alive withholds the
+    /// stream's credit from the peer: after ~100 requests (Iroh's concurrent stream limit),
+    /// `open_bi` would block forever on a perfectly healthy connection.
+    fn release_stream_if_done(&self, stream_key: BrowserStreamKey, stream: &BrowserStreamState) {
+        if stream.closed_send.load(Ordering::SeqCst) && stream.closed_recv.load(Ordering::SeqCst) {
+            self.inner
+                .lock()
+                .expect("browser runtime node mutex poisoned")
+                .streams
+                .remove(&stream_key);
+        }
     }
 
     fn insert_stream(

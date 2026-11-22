@@ -119,6 +119,47 @@ async fn finished_streams_kept_alive_do_not_exhaust_stream_credit() -> anyhow::R
     Ok(())
 }
 
+/// The HTTP pattern: the server answers and drops its receive side before the client's FIN
+/// (STOP_SENDING), the client finishes only after reading the answer. The client must then
+/// release its handles, as the browser runtime does: kept handles withhold the stream's credit
+/// and `open_bi` blocks at Iroh's concurrent stream limit (100).
+#[tokio::test]
+async fn streams_stopped_by_the_server_give_their_credit_back() -> anyhow::Result<()> {
+    let client = native_node(SecretKey::generate()).await?;
+    let server = native_node(SecretKey::generate()).await?;
+    let server_addr = endpoint_addr(&server).await?;
+    let accept_server = server.clone();
+    let accept = task::spawn(async move {
+        let connection = accept_server.accept(ALPN).await?;
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+            let mut buf = [0u8; 4];
+            recv.read_exact(&mut buf).await?;
+            drop(recv);
+            send.write_all(PONG).await?;
+            send.finish()?;
+        }
+        anyhow::Ok(())
+    });
+    let connection = timeout(
+        "dial facade connection",
+        client.dial(server_addr, ALPN, WebRtcDialOptions::webrtc_only()),
+    )
+    .await?;
+    for i in 0..300 {
+        let (mut send, mut recv) = timeout("open bidirectional stream", connection.open_bi())
+            .await
+            .map_err(|e| e.context(format!("stream {i}")))?;
+        send.write_all(PING).await?;
+        assert_eq!(recv.read_to_end(64).await?, PONG);
+        send.finish()?;
+        drop((send, recv));
+    }
+    accept.abort();
+    client.close().await;
+    server.close().await;
+    Ok(())
+}
+
 /// Opening a long discussion streams megabytes at once: the DataChannel must carry them.
 #[tokio::test]
 async fn large_response_crosses_the_data_channel() -> anyhow::Result<()> {
